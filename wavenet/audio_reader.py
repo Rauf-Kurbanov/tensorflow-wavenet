@@ -141,6 +141,7 @@ class AudioReader(object):
         else:
             self.gc_category_cardinality = None
 
+    # TODO return batch alongside with local condition feature batch
     def dequeue(self, num_elements):
         output = self.queue.dequeue_many(num_elements)
         return output
