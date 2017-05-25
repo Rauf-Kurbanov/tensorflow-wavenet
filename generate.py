@@ -95,6 +95,11 @@ def get_arguments():
         type=int,
         default=None,
         help='ID of category to generate, if globally conditioned.')
+    parser.add_argument(
+        '--lc_embedded_path',
+        type=str,
+        default=None,
+        help='Path to file with embedded local condition representation')
     arguments = parser.parse_args()
     if arguments.gc_channels is not None:
         if arguments.gc_cardinality is None:
@@ -157,10 +162,15 @@ def main():
 
     samples = tf.placeholder(tf.int32)
 
+    lc_embedded = None
+    if args.lc_embedded_path:
+        with open(args.lc_embedded_path, 'r') as f:
+            lc_embedded = f.read()
+
     if args.fast_generation:
-        next_sample = net.predict_proba_incremental(samples, args.gc_id)
+        next_sample = net.predict_proba_incremental(samples, args.gc_id, lc_embedded)
     else:
-        next_sample = net.predict_proba(samples, args.gc_id)
+        next_sample = net.predict_proba(samples, args.gc_id, lc_embedded)
 
     if args.fast_generation:
         sess.run(tf.global_variables_initializer())

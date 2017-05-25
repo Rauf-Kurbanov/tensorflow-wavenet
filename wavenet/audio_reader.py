@@ -61,6 +61,27 @@ def load_generic_audio(directory, sample_rate):
         yield audio, filename, category_id
 
 
+def load_vctk_audio(directory, sample_rate):
+    '''Generator that yields audio waveforms from the VCTK dataset, and
+    additionally the ID of the corresponding speaker.'''
+    files = find_files(directory)
+    speaker_re = re.compile(r'p([0-9]+)_([0-9]+)\.wav')
+    for filename in files:
+        audio, _ = librosa.load(filename, sr=sample_rate, mono=True)
+        audio = audio.reshape(-1, 1)
+        matches = speaker_re.findall(filename)[0]
+        speaker_id, recording_id = [int(id_) for id_ in matches]
+
+        dirs_vctk_wav48_p, name = os.path.split(filename)
+        dirs_vctk_wav48, p = os.path.split(dirs_vctk_wav48_p)
+        dirs_vctk, wav48 = os.path.split(dirs_vctk_wav48)
+        filename_text = os.path.join(dirs_vctk, 'txt', p, name[:-4] + '.txt')
+
+        with open(filename_text) as f:
+            text = f.read()
+        yield audio, (filename, speaker_id, list(text))
+
+
 def trim_silence(audio, threshold):
     '''Removes silence at the beginning and end of a sample.'''
     energy = librosa.feature.rmse(audio)
@@ -94,7 +115,9 @@ class AudioReader(object):
                  receptive_field,
                  sample_size=None,
                  silence_threshold=None,
-                 queue_size=32):
+                 queue_size=32,
+                 vctk=False,
+                 lc_enabled=False):
         self.audio_dir = audio_dir
         self.sample_rate = sample_rate
         self.coord = coord
@@ -102,18 +125,25 @@ class AudioReader(object):
         self.receptive_field = receptive_field
         self.silence_threshold = silence_threshold
         self.gc_enabled = gc_enabled
+        self.lc_enabled = lc_enabled
         self.threads = []
         self.sample_placeholder = tf.placeholder(dtype=tf.float32, shape=None)
         self.queue = tf.PaddingFIFOQueue(queue_size,
                                          ['float32'],
                                          shapes=[(None, 1)])
         self.enqueue = self.queue.enqueue([self.sample_placeholder])
+        self.vctk = vctk
 
         if self.gc_enabled:
             self.id_placeholder = tf.placeholder(dtype=tf.int32, shape=())
             self.gc_queue = tf.PaddingFIFOQueue(queue_size, ['int32'],
                                                 shapes=[()])
             self.gc_enqueue = self.gc_queue.enqueue([self.id_placeholder])
+
+        if self.lc_enabled:
+            self.lc_placeholder = tf.placeholder(dtype=tf.int32, shape=1)
+        #     self.lc_queue = tf.PaddingFIFOQueue(queue_size, ['int32'],
+        #                                     shapes=[()])
 
         # TODO Find a better way to check this.
         # Checking inside the AudioReader's thread makes it hard to terminate
