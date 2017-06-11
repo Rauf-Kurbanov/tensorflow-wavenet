@@ -103,6 +103,10 @@ def get_arguments():
     parser.add_argument('--max_checkpoints', type=int, default=MAX_TO_KEEP,
                         help='Maximum amount of checkpoints that will be kept alive. Default: '
                              + str(MAX_TO_KEEP) + '.')
+    parser.add_argument('--vctk', dest='vctk', action='store_true',
+                        default=False, help='Specify using VCTK datset')
+    parser.add_argument('--ya_lc', type=_str_to_bool, default=False,
+                        help='Use yandex features as local condition')
     return parser.parse_args()
 
 
@@ -215,11 +219,14 @@ def main():
         silence_threshold = args.silence_threshold if args.silence_threshold > \
                                                       EPSILON else None
         gc_enabled = args.gc_channels is not None
+        lc_enabled = args.ya_lc
+
         reader = AudioReader(
             args.data_dir,
             coord,
             sample_rate=wavenet_params['sample_rate'],
             gc_enabled=gc_enabled,
+            lc_enabled=lc_enabled,
             receptive_field=WaveNetModel.calculate_receptive_field(wavenet_params["filter_width"],
                                                                    wavenet_params["dilations"],
                                                                    wavenet_params["scalar_input"],
@@ -231,6 +238,13 @@ def main():
             gc_id_batch = reader.dequeue_gc(args.batch_size)
         else:
             gc_id_batch = None
+
+        if lc_enabled:
+            # TODO
+            lc_batch = reader.dequeue_lc(args.batch_size)
+        else:
+            lc_batch = None
+
 
     # Create network.
     net = WaveNetModel(
@@ -252,6 +266,7 @@ def main():
         args.l2_regularization_strength = None
     loss = net.loss(input_batch=audio_batch,
                     global_condition_batch=gc_id_batch,
+                    local_condition_batch=lc_batch,
                     l2_regularization_strength=args.l2_regularization_strength)
     optimizer = optimizer_factory[args.optimizer](
                     learning_rate=args.learning_rate,

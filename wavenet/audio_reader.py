@@ -61,25 +61,78 @@ def load_generic_audio(directory, sample_rate):
         yield audio, filename, category_id
 
 
-def load_vctk_audio(directory, sample_rate):
+# def load_vctk_audio(directory, sample_rate):
+#     '''Generator that yields audio waveforms from the VCTK dataset, and
+#     additionally the ID of the corresponding speaker.'''
+#     files = find_files(directory)
+#     speaker_re = re.compile(r'p([0-9]+)_([0-9]+)\.wav')
+#     for filename in files:
+#         audio, _ = librosa.load(filename, sr=sample_rate, mono=True)
+#         audio = audio.reshape(-1, 1)
+#         matches = speaker_re.findall(filename)[0]
+#         speaker_id, recording_id = [int(id_) for id_ in matches]
+#
+#         dirs_vctk_wav48_p, name = os.path.split(filename)
+#         dirs_vctk_wav48, p = os.path.split(dirs_vctk_wav48_p)
+#         dirs_vctk, wav48 = os.path.split(dirs_vctk_wav48)
+#         filename_text = os.path.join(dirs_vctk, 'txt', p, name[:-4] + '.txt')
+#
+#         with open(filename_text) as f:
+#             text = f.read()
+#         yield audio, (filename, speaker_id, list(text))
+
+
+def original_to_generated(path, ya_gen_path):
+    pxxx_dir, wavname = os.path.split(path)
+    base_dir, pxxx = os.path.split(pxxx_dir)
+    return os.path.join(ya_gen_path, pxxx, wavname)
+
+
+def fix_ya_len(audio, ya_audio):
+    len_orig = len(audio)
+    len_ya = len(ya_audio)
+    if len_orig < len_ya:
+        ya_audio = ya_audio[:len_orig]
+    if len_orig > len_ya:
+        ya_audio += audio[len_ya:]
+
+    return ya_audio
+
+
+def read_matching_ya(wav_path, sr=16000):
+    ya_path = original_to_generated(wav_path)
+
+    audio, _ = librosa.load(wav_path, sr=sr)
+    ya_audio, _ = librosa.load(ya_path, sr=sr)
+    len_ratio = len(audio) / len(ya_audio)
+    new_sr = sr * len_ratio
+    ya_audio, _ = librosa.load(ya_path, sr=new_sr)
+
+    len_orig = len(audio)
+    len_ya = len(ya_audio)
+    if len_orig < len_ya:
+        ya_audio = ya_audio[:len_orig]
+    if len_orig > len_ya:
+        ya_audio += audio[len_ya:]
+
+    return fix_ya_len(audio, ya_audio)
+
+
+# TODO read both audio and ya_audio and yeld them from iterator
+def load_vctk_audio_ya(directory, sample_rate, ya_gen_path):
     '''Generator that yields audio waveforms from the VCTK dataset, and
     additionally the ID of the corresponding speaker.'''
     files = find_files(directory)
+    # ya_files = [original_to_generated(f, ya_gen_path) for f in files]
+
     speaker_re = re.compile(r'p([0-9]+)_([0-9]+)\.wav')
-    for filename in files:
+    for filename, ya_filename in zip(files, ya_files):
         audio, _ = librosa.load(filename, sr=sample_rate, mono=True)
         audio = audio.reshape(-1, 1)
         matches = speaker_re.findall(filename)[0]
         speaker_id, recording_id = [int(id_) for id_ in matches]
 
-        dirs_vctk_wav48_p, name = os.path.split(filename)
-        dirs_vctk_wav48, p = os.path.split(dirs_vctk_wav48_p)
-        dirs_vctk, wav48 = os.path.split(dirs_vctk_wav48)
-        filename_text = os.path.join(dirs_vctk, 'txt', p, name[:-4] + '.txt')
-
-        with open(filename_text) as f:
-            text = f.read()
-        yield audio, (filename, speaker_id, list(text))
+        yield audio, (filename, speaker_id, ya_filename)
 
 
 def trim_silence(audio, threshold):
@@ -117,7 +170,8 @@ class AudioReader(object):
                  silence_threshold=None,
                  queue_size=32,
                  vctk=False,
-                 lc_enabled=False):
+                 lc_enabled=False,
+                 vctk_ya=False):
         self.audio_dir = audio_dir
         self.sample_rate = sample_rate
         self.coord = coord
@@ -131,8 +185,28 @@ class AudioReader(object):
         self.queue = tf.PaddingFIFOQueue(queue_size,
                                          ['float32'],
                                          shapes=[(None, 1)])
+        ###
+        self.id_placeholder = tf.placeholder(dtype=tf.int32, shape=())
+
+        self.lc_placeholder = tf.placeholder(dtype=tf.float32, shape=(None,))
+        self.conditions_queue = tf.PaddingFIFOQueue(queue_size,
+                                                    ['float32', 'string'],
+                                                    shapes=[(), (None,)])
+
+        # self.conditions_queue = tf.PaddingFIFOQueue(queue_size,
+        #                                             ['int32', 'string'],
+        #                                             shapes=[(), (None,)])
+
         self.enqueue = self.queue.enqueue([self.sample_placeholder])
-        self.vctk = vctk
+
+        self.conditions_enqueue = self.conditions_queue.enqueue([
+            self.id_placeholder,
+            self.lc_placeholder])
+        ###
+
+        # self.enqueue = self.queue.enqueue([self.sample_placeholder])
+        # self.vctk = vctk
+        self.vctk_ya = vctk_ya
 
         if self.gc_enabled:
             self.id_placeholder = tf.placeholder(dtype=tf.int32, shape=())
@@ -142,7 +216,8 @@ class AudioReader(object):
 
         if self.lc_enabled:
             self.lc_placeholder = tf.placeholder(dtype=tf.int32, shape=1)
-        #     self.lc_queue = tf.PaddingFIFOQueue(queue_size, ['int32'],
+
+        # self.lc_queue = tf.PaddingFIFOQueue(queue_size, ['int32'],
         #                                     shapes=[()])
 
         # TODO Find a better way to check this.
@@ -167,7 +242,7 @@ class AudioReader(object):
             # file names.
             self.gc_category_cardinality += 1
             print("Detected --gc_cardinality={}".format(
-                  self.gc_category_cardinality))
+                self.gc_category_cardinality))
         else:
             self.gc_category_cardinality = None
 
@@ -180,45 +255,49 @@ class AudioReader(object):
         return self.gc_queue.dequeue_many(num_elements)
 
     def thread_main(self, sess):
+        buffer_ = np.array([])
         stop = False
         # Go through the dataset multiple times
         while not stop:
-            iterator = load_generic_audio(self.audio_dir, self.sample_rate)
-            for audio, filename, category_id in iterator:
+            if self.vctk_ya:
+                iterator = load_vctk_audio_ya(self.audio_dir, self.sample_rate)
+            else:
+                iterator = load_generic_audio(self.audio_dir, self.sample_rate)
+            for audio, extra in iterator:
                 if self.coord.should_stop():
                     stop = True
                     break
                 if self.silence_threshold is not None:
                     # Remove silence
                     audio = trim_silence(audio[:, 0], self.silence_threshold)
-                    audio = audio.reshape(-1, 1)
                     if audio.size == 0:
                         print("Warning: {} was ignored as it contains only "
                               "silence. Consider decreasing trim_silence "
                               "threshold, or adjust volume of the audio."
-                              .format(filename))
-
-                audio = np.pad(audio, [[self.receptive_field, 0], [0, 0]],
-                               'constant')
+                              .format(extra))
 
                 if self.sample_size:
-                    # Cut samples into pieces of size receptive_field +
-                    # sample_size with receptive_field overlap
-                    while len(audio) > self.receptive_field:
-                        piece = audio[:(self.receptive_field +
-                                        self.sample_size), :]
+                    # Cut samples into fixed size pieces
+                    buffer_ = np.append(buffer_, audio)
+                    while len(buffer_) > self.sample_size:
+                        piece = np.reshape(buffer_[:self.sample_size], [-1, 1])
                         sess.run(self.enqueue,
                                  feed_dict={self.sample_placeholder: piece})
-                        audio = audio[self.sample_size:, :]
-                        if self.gc_enabled:
-                            sess.run(self.gc_enqueue, feed_dict={
-                                self.id_placeholder: category_id})
+                        buffer_ = buffer_[self.sample_size:]
+                        if self.vctk_ya:
+                            filename, user_id, text = extra
+                            sess.run(self.conditions_enqueue,
+                                     feed_dict={self.id_placeholder: user_id,
+                                                self.lc_placeholder: text})
                 else:
                     sess.run(self.enqueue,
-                             feed_dict={self.sample_placeholder: audio})
-                    if self.gc_enabled:
-                        sess.run(self.gc_enqueue,
-                                 feed_dict={self.id_placeholder: category_id})
+                             feed_dict={self.sample_placeholder: np.reshape(audio, (-1, 1))})
+                    if self.vctk_ya:
+                        filename, speaker_id, ya_filename = extra
+                        # filename, user_id, text = extra
+                        sess.run(self.conditions_enqueue,
+                                 feed_dict={self.id_placeholder: speaker_id,
+                                            self.lc_placeholder: text})
 
     def start_threads(self, sess, n_threads=1):
         for _ in range(n_threads):
